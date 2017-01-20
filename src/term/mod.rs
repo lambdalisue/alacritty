@@ -20,10 +20,10 @@ use std::cmp::min;
 use std::io;
 
 use ansi::{self, Color, NamedColor, Attr, Handler, CharsetIndex, StandardCharset};
+use config::{Config, CursorStyle};
 use grid::{Grid, ClearRegion, ToRange};
 use index::{self, Point, Column, Line, Linear, IndexRange, Contains, RangeInclusive};
 use selection::{Span, Selection};
-use config::{Config};
 
 pub mod cell;
 pub use self::cell::Cell;
@@ -40,11 +40,33 @@ use self::cell::LineLength;
 pub struct RenderableCellsIter<'a> {
     grid: &'a mut Grid<Cell>,
     cursor: &'a Point,
+    cursor_style: CursorStyle,
     mode: TermMode,
     line: Line,
     column: Column,
     selection: Option<RangeInclusive<index::Linear>>,
-    cursor_original: Option<IndexedCell>
+    cursor_cell: CursorCell,
+    last_cell: bool
+}
+
+enum CursorCell {
+    Extra(IndexedCell),
+    Replacement(IndexedCell)
+}
+
+impl CursorCell {
+    fn as_mut(&mut self) -> &mut IndexedCell {
+        match *self {
+            CursorCell::Extra(ref mut cell) => cell,
+            CursorCell::Replacement(ref mut cell) => cell,
+        }
+    }
+    fn as_ref(&self) -> &IndexedCell {
+        match *self {
+            CursorCell::Extra(ref cell) => cell,
+            CursorCell::Replacement(ref cell) => cell,
+        }
+    }
 }
 
 impl<'a> RenderableCellsIter<'a> {
@@ -55,6 +77,7 @@ impl<'a> RenderableCellsIter<'a> {
     fn new<'b>(
         grid: &'b mut Grid<Cell>,
         cursor: &'b Point,
+        cursor_style: CursorStyle,
         mode: TermMode,
         selection: &Selection,
         custom_cursor_colors: bool,
@@ -62,32 +85,58 @@ impl<'a> RenderableCellsIter<'a> {
         let selection = selection.span()
             .map(|span| span.to_range(grid.num_cols()));
 
+        let cell = IndexedCell {
+            line: cursor.line,
+            column: cursor.col,
+            inner: grid[cursor]
+        };
+
+        let cursor_cell = match cursor_style.0 {
+            ansi::CursorStyle::Block => {
+                CursorCell::Replacement(cell)
+            }
+            ansi::CursorStyle::Underline => {
+                CursorCell::Extra(cell)
+            }
+            ansi::CursorStyle::Beam => {
+                CursorCell::Extra(cell)
+            }
+        };
+
         RenderableCellsIter {
             grid: grid,
             cursor: cursor,
+            cursor_style: cursor_style,
             mode: mode,
             line: Line(0),
             column: Column(0),
             selection: selection,
-            cursor_original: None,
+            cursor_cell: cursor_cell,
+            last_cell: false
         }.initialize(custom_cursor_colors)
     }
 
     fn initialize(mut self, custom_cursor_colors: bool) -> Self {
         if self.cursor_is_visible() {
-            self.cursor_original = Some(IndexedCell {
-                line:   self.cursor.line,
-                column: self.cursor.col,
-                inner:  self.grid[self.cursor]
-            });
-            if custom_cursor_colors {
-                let cell = &mut self.grid[self.cursor];
-                cell.fg = Color::Named(NamedColor::CursorForeground);
-                cell.bg = Color::Named(NamedColor::CursorBackground);
+            let cell = self.cursor_cell.as_mut();
 
-            } else {
-                let cell = &mut self.grid[self.cursor];
-                mem::swap(&mut cell.fg, &mut cell.bg);
+            if custom_cursor_colors {
+                cell.inner.fg = Color::Named(NamedColor::CursorForeground);
+                cell.inner.bg = Color::Named(NamedColor::CursorBackground);
+            }
+
+            match self.cursor_style.0 {
+                ansi::CursorStyle::Block => {
+                    if !custom_cursor_colors {
+                        mem::swap(&mut cell.inner.fg, &mut cell.inner.bg);
+                    }
+                }
+                ansi::CursorStyle::Underline => {
+                    cell.inner.c = '\u{2581}';
+                }
+                ansi::CursorStyle::Beam => {
+                    cell.inner.c = '\u{258f}';
+                }
             }
         }
         self
@@ -104,9 +153,8 @@ impl<'a> Drop for RenderableCellsIter<'a> {
     /// Resets temporary render state on the grid
     fn drop(&mut self) {
         if self.cursor_is_visible() {
-            if let Some(ref original) = self.cursor_original {
-                self.grid[self.cursor] = original.inner;
-            }
+            let cell = self.cursor_cell.as_mut();
+            cell.inner = self.grid[self.cursor];
         }
     }
 }
@@ -147,7 +195,8 @@ impl<'a> Iterator for RenderableCellsIter<'a> {
                 // Update state for next iteration
                 self.column += 1;
 
-                let selected = self.selection.as_ref()
+                let selected = self.selection
+                    .as_ref()
                     .map(|range| range.contains_(index))
                     .unwrap_or(false);
 
@@ -172,16 +221,46 @@ impl<'a> Iterator for RenderableCellsIter<'a> {
                         flags: cell.flags,
                         c: cell.c,
                         fg: *fg,
-                        bg: *bg,
+                        bg: *bg
                     }
-                })
+                });
             }
 
             self.column = Column(0);
             self.line += 1;
         }
 
-        None
+        if self.last_cell {
+            return None;
+        } else {
+            let cell = self.cursor_cell.as_ref();
+
+            let (fg, bg) = match self.cursor_style.0 {
+                ansi::CursorStyle::Block => {
+                    (cell.fg, cell.bg)
+                }
+                ansi::CursorStyle::Beam | ansi::CursorStyle::Underline => {
+                    if cell.flags.contains(cell::INVERSE) {
+                        (cell.fg, Color::Named(NamedColor::Foreground))
+                    } else {
+                        (cell.fg, cell.bg)
+                    }
+                }
+            };
+            
+            self.last_cell = true;            
+
+            return Some(IndexedCell {
+                line: cell.line,
+                column: cell.column,
+                inner: Cell {
+                    flags: cell.flags,
+                    c: cell.c,
+                    fg: fg,
+                    bg: bg
+                }
+            });
+        }
     }
 }
 
@@ -232,7 +311,7 @@ impl CharsetMapping for StandardCharset {
     fn map(&self, c: char) -> char {
         match *self {
             StandardCharset::Ascii => c,
-            StandardCharset::SpecialCharacterAndLineDrawing =>
+            StandardCharset::SpecialCharacterAndLineDrawing => {
                 match c {
                     '`' => '◆',
                     'a' => '▒',
@@ -265,8 +344,9 @@ impl CharsetMapping for StandardCharset {
                     '|' => '≠',
                     '}' => '£',
                     '~' => '·',
-                    _ => c
-                },
+                    _ => c,
+                }
+            }
         }
     }
 }
@@ -323,6 +403,9 @@ pub struct Term {
 
     /// The cursor
     cursor: Cursor,
+
+    /// The cursor type
+    cursor_style: CursorStyle,
 
     /// The graphic character set, out of `charsets`, which ASCII is currently
     /// being mapped to
@@ -391,7 +474,7 @@ impl SizeInfo {
 
         Some(Point {
             line: min(line, self.lines() - 1),
-            col: min(col, self.cols() - 1)
+            col: min(col, self.cols() - 1),
         })
     }
 }
@@ -428,6 +511,7 @@ impl Term {
             alt: false,
             active_charset: Default::default(),
             cursor: Default::default(),
+            cursor_style: config.cursor_style(),
             cursor_save: Default::default(),
             cursor_save_alt: Default::default(),
             tabs: tabs,
@@ -440,7 +524,8 @@ impl Term {
     }
 
     pub fn update_config(&mut self, config: &Config) {
-        self.custom_cursor_colors = config.custom_cursor_colors()
+        self.custom_cursor_colors = config.custom_cursor_colors();
+        self.cursor_style = config.cursor_style();
     }
 
     #[inline]
@@ -465,19 +550,18 @@ impl Term {
                 self.push(c);
             }
         }
-        trait Append<T> : PushChar {
+        trait Append<T>: PushChar {
             fn append(&mut self, grid: &Grid<Cell>, line: Line, cols: T) -> Option<Range<Column>>;
         }
 
         use std::ops::{Range, RangeTo, RangeFrom, RangeFull};
 
         impl Append<Range<Column>> for String {
-            fn append(
-                &mut self,
-                grid: &Grid<Cell>,
-                line: Line,
-                cols: Range<Column>
-            ) -> Option<Range<Column>> {
+            fn append(&mut self,
+                      grid: &Grid<Cell>,
+                      line: Line,
+                      cols: Range<Column>)
+                      -> Option<Range<Column>> {
                 let line = &grid[line];
                 let line_length = line.line_length();
                 let line_end = min(line_length, cols.end + 1);
@@ -496,19 +580,22 @@ impl Term {
 
         impl Append<RangeTo<Column>> for String {
             #[inline]
-            fn append(&mut self, grid: &Grid<Cell>, line: Line, cols: RangeTo<Column>) -> Option<Range<Column>> {
+            fn append(&mut self,
+                      grid: &Grid<Cell>,
+                      line: Line,
+                      cols: RangeTo<Column>)
+                      -> Option<Range<Column>> {
                 self.append(grid, line, Column(0)..cols.end)
             }
         }
 
         impl Append<RangeFrom<Column>> for String {
             #[inline]
-            fn append(
-                &mut self,
-                grid: &Grid<Cell>,
-                line: Line,
-                cols: RangeFrom<Column>
-            ) -> Option<Range<Column>> {
+            fn append(&mut self,
+                      grid: &Grid<Cell>,
+                      line: Line,
+                      cols: RangeFrom<Column>)
+                      -> Option<Range<Column>> {
                 let range = self.append(grid, line, cols.start..Column(usize::max_value() - 1));
                 range.as_ref()
                     .map(|range| self.maybe_newline(grid, line, range.end));
@@ -518,12 +605,11 @@ impl Term {
 
         impl Append<RangeFull> for String {
             #[inline]
-            fn append(
-                &mut self,
-                grid: &Grid<Cell>,
-                line: Line,
-                _: RangeFull
-            ) -> Option<Range<Column>> {
+            fn append(&mut self,
+                      grid: &Grid<Cell>,
+                      line: Line,
+                      _: RangeFull)
+                      -> Option<Range<Column>> {
                 let range = self.append(grid, line, Column(0)..Column(usize::max_value() - 1));
                 range.as_ref()
                     .map(|range| self.maybe_newline(grid, line, range.end));
@@ -540,7 +626,7 @@ impl Term {
             // Selection within single line
             Line(0) => {
                 res.append(&self.grid, start.line, start.col..end.col);
-            },
+            }
 
             // Selection ends on line following start
             Line(1) => {
@@ -549,7 +635,7 @@ impl Term {
 
                 // Ending line
                 res.append(&self.grid, end.line, ..end.col);
-            },
+            }
 
             // Multi line selection
             _ => {
@@ -596,6 +682,7 @@ impl Term {
         RenderableCellsIter::new(
             &mut self.grid,
             &self.cursor.point,
+            self.cursor_style,
             self.mode,
             selection,
             self.custom_cursor_colors
@@ -1065,6 +1152,12 @@ impl ansi::Handler for Term {
     }
 
     #[inline]
+    fn set_cursor_style(&mut self, style: ansi::CursorStyle) {
+        trace!("set_cursor_style: {:?}", style);
+        self.cursor_style.0 = style;
+    }
+
+    #[inline]
     fn save_cursor_position(&mut self) {
         trace!("CursorSave");
         let mut holder = if self.alt {
@@ -1100,19 +1193,19 @@ impl ansi::Handler for Term {
                 for cell in &mut row[col..] {
                     cell.reset(&template);
                 }
-            },
+            }
             ansi::LineClearMode::Left => {
                 let row = &mut self.grid[self.cursor.point.line];
                 for cell in &mut row[..(col + 1)] {
                     cell.reset(&template);
                 }
-            },
+            }
             ansi::LineClearMode::All => {
                 let row = &mut self.grid[self.cursor.point.line];
                 for cell in &mut row[..] {
                     cell.reset(&template);
                 }
-            },
+            }
         }
     }
 
@@ -1127,10 +1220,10 @@ impl ansi::Handler for Term {
                         cell.reset(&template);
                     }
                 }
-            },
+            }
             ansi::ClearMode::All => {
                 self.grid.clear(|c| c.reset(&template));
-            },
+            }
             _ => {
                 trace!("ansi::ClearMode::Above not implemented");
             }
@@ -1207,7 +1300,7 @@ impl ansi::Handler for Term {
     }
 
     #[inline]
-    fn unset_mode(&mut self,mode: ansi::Mode) {
+    fn unset_mode(&mut self, mode: ansi::Mode) {
         trace!("unset_mode: {:?}", mode);
         match mode {
             ansi::Mode::SwapScreenAndSetRestoreCursor => {
@@ -1269,8 +1362,9 @@ mod tests {
 
     use grid::Grid;
     use index::{Point, Line, Column};
-    use term::{Cell};
+    use term::Cell;
     use ansi::{Handler, CharsetIndex, StandardCharset};
+    use config::Config;
 
     /// Check that the grid can be serialized back and forth losslessly
     ///
@@ -1282,8 +1376,7 @@ mod tests {
 
         let grid = Grid::new(Line(24), Column(80), &template);
         let serialized = serde_json::to_string(&grid).expect("ser");
-        let deserialized = serde_json::from_str::<Grid<Cell>>(&serialized)
-                                      .expect("de");
+        let deserialized = serde_json::from_str::<Grid<Cell>>(&serialized).expect("de");
 
         assert_eq!(deserialized, grid);
     }
@@ -1303,6 +1396,7 @@ mod tests {
             cell_width: 3.0,
             cell_height: 3.0,
         };
+
         let mut term = Term::new(&Default::default(), size);
         let cursor = Point::new(Line(0), Column(0));
         term.configure_charset(CharsetIndex::G0,
@@ -1325,6 +1419,7 @@ mod benches {
 
     use grid::Grid;
     use selection::Selection;
+    use config::Config;
 
     use super::{SizeInfo, Term};
     use super::cell::Cell;
@@ -1333,8 +1428,10 @@ mod benches {
         where P: AsRef<Path>
     {
         let mut res = String::new();
-        File::open(path.as_ref()).unwrap()
-            .read_to_string(&mut res).unwrap();
+        File::open(path.as_ref())
+            .unwrap()
+            .read_to_string(&mut res)
+            .unwrap();
 
         res
     }
@@ -1351,12 +1448,10 @@ mod benches {
     #[bench]
     fn render_iter(b: &mut test::Bencher) {
         // Need some realistic grid state; using one of the ref files.
-        let serialized_grid = read_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ref/vim_large_window_scroll/grid.json")
-        );
-        let serialized_size = read_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ref/vim_large_window_scroll/size.json")
-        );
+        let serialized_grid = read_string(concat!(env!("CARGO_MANIFEST_DIR"),
+                                                  "/tests/ref/vim_large_window_scroll/grid.json"));
+        let serialized_size = read_string(concat!(env!("CARGO_MANIFEST_DIR"),
+                                                  "/tests/ref/vim_large_window_scroll/size.json"));
 
         let mut grid: Grid<Cell> = json::from_str(&serialized_grid).unwrap();
         let size: SizeInfo = json::from_str(&serialized_size).unwrap();

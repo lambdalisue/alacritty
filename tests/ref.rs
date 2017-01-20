@@ -10,6 +10,7 @@ use alacritty::Term;
 use alacritty::term::Cell;
 use alacritty::term::SizeInfo;
 use alacritty::ansi;
+use alacritty::config::Config;
 
 macro_rules! ref_tests {
     ($($name:ident,)*) => {
