@@ -28,6 +28,7 @@
     <string></string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <!--
     <key>LSEnvironment</key>
     <dict>
       <key>HOME</key>
@@ -35,5 +36,6 @@
       <key>PATH</key>
       <string>$PATH</string>
    </dict>
+   -->
 </dict>
 </plist>
