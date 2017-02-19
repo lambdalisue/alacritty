@@ -1,9 +1,9 @@
 TARGET = alacritty
 
 APP_NAME = Alacritty.app
-ASSETS_DIR = assets
+ASSETS_DIR = assets/osx
 RELEASE_DIR = target/release
-APP_TEMPLATE = $(ASSETS_DIR)/osx/$(APP_NAME)
+APP_TEMPLATE = $(ASSETS_DIR)/$(APP_NAME)
 APP_DIR = $(RELEASE_DIR)/osx
 APP_BINARY = $(RELEASE_DIR)/$(TARGET)
 APP_BINARY_DIR  = $(APP_DIR)/$(APP_NAME)/Contents/MacOS
@@ -26,7 +26,8 @@ $(TARGET):
 
 app: | $(APP_NAME) ## Clone Alacritty.app template and mount binary
 $(APP_NAME): $(TARGET) $(APP_TEMPLATE)
-	@mkdir -p $(APP_BINARY_DIR)
+	@mkdir -p $(APP_DIR)
+	@osacompile -x -o $(APP_DIR)/$(APP_NAME) $(ASSETS_DIR)/launcher.scpt
 	@cp -fRp $(APP_TEMPLATE) $(APP_DIR)
 	@cp -fp $(APP_BINARY) $(APP_BINARY_DIR)
 	@echo "Created '$@' in '$(APP_DIR)'"
